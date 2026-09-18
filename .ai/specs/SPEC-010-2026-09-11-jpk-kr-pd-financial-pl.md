@@ -30,7 +30,9 @@
 > face value (per this project's citation-check discipline). Result:
 > both Blockers confirmed and fixed (tenant/organization scope now
 > derived server-side, never trusted from the caller, on
-> `jpk-kr.generate`/`.submit`; an encryption-at-rest entry for
+> `financial_pl.jpk_kr.upsert_filing`/`.generate`/`.submit` — also
+> corrected the command surface itself to a real three-command split,
+> not just its trust model, see Design decisions; an encryption-at-rest entry for
 > `generatedXml`/`upoXml` in `financial_pl`'s `defaultEncryptionMaps`);
 > Major #4 (whole-ledger scale) and Major #5 (missing test plan)
 > confirmed and fixed; Major #2's XSD/scope sub-claim was already
@@ -89,6 +91,31 @@ in bulk from another module's code, which `ledger`'s Bulk Read Service
 (`#6038`, still unmerged) is designed to provide. Book/tax reconciliation
 (`RPD`) is treated as out of scope for this document (see Design
 Decisions) and left as its own future spec.
+
+## Overview
+
+`financial_pl` (`@open-mercato/financial-pl`) is Commerce Weavers'
+Polish-compliance module: KSeF 2.0 e-invoicing, JPK_V7 VAT filing,
+invoice PDF/authoring, corrections. This spec adds its second
+statutory e-filing surface, **JPK_KR_PD** — the annual export of a
+taxpayer's full general ledger (chart of accounts, journal, postings,
+trial balance) — for Open Mercato merchants who keep full accounting
+books (księgi rachunkowe) under Polish CIT/PIT law. The audience is
+the same one `financial_pl` already serves: Polish SMEs and their
+accountants who currently prepare this filing by hand or through a
+desktop ERP, and who gain a single compliance surface (KSeF + JPK_V7
++ JPK_KR_PD) instead of stitching Open Mercato's ledger data into a
+separate filing tool.
+
+> **Market Reference**: Comarch ERP XL's JPK_KR_PD implementation was
+> studied directly (its published module documentation, not just a
+> brochure) — see Architecture → Primary-source XSD verification.
+> Adopted: treating `RPD` as a small, manually-completed summary node
+> rather than an automated book/tax reconciliation engine, since a
+> mature real ERP handles it the same way. Rejected: nothing borrowed
+> wholesale — Comarch is a desktop, single-tenant ERP with no
+> multi-tenant/API-first architecture to adopt; only the field-level
+> XSD interpretation and the `RPD` scope finding transferred.
 
 ## 📝 Problem Statement
 
@@ -217,9 +244,18 @@ sections describe the intended shape, not something buildable today.
 
 ### New components in `financial_pl`
 
-- `data/entities.ts` — add `JpkKrFiling` (see Data Model).
-- `commands/jpk-kr.ts` — `jpkKrGenerateSchema` / `jpkKrSubmitSchema`,
-  mirroring `commands/jpk.ts`'s existing shape.
+- `data/entities.ts` — add `JpkKrFiling` (table `financial_pl_jpk_kr_filing`)
+  and `JpkKrDeclarationInputs` (table
+  `financial_pl_jpk_kr_declaration_inputs`) — see Data Model.
+- `commands/jpk-kr.ts` — **corrected 2026-09-18 to a three-command
+  split, mirroring `commands/jpk.ts`'s real shape exactly** (a prior
+  pass on this section conflated create+generate into one
+  `jpk-kr.generate` command, which had no real precedent):
+  `jpkKrFilingUpsertSchema` (`financial_pl.jpk_kr.upsert_filing`,
+  undoable), `jpkKrGenerateSchema` (`financial_pl.jpk_kr.generate`,
+  `{ filingId }` only, not undoable), `jpkKrSubmitSchema`
+  (`financial_pl.jpk_kr.submit`, `{ filingId }` only, not undoable —
+  see API Contracts and the Undo Contract note below).
 - `lib/jpk-kr/build-jpk-kr-xml.ts`, `build-zois.ts` (thin wrapper over
   `getZois`), `build-dziennik.ts` / `build-konto-zapis.ts` (thin wrappers
   over `iterateJournalEntries` / `iterateJournalEntryLines`),
@@ -227,6 +263,10 @@ sections describe the intended shape, not something buildable today.
 - `lib/jpk-kr/schema/` — vendored official JPK_KR_PD XSD.
 - `workers/jpk-kr-generate.worker.ts` — annual trigger, reusing
   `lib/queue.ts`.
+- `acl.ts` / `setup.ts` — **no new features** (added 2026-09-18): this
+  spec reuses `financial_pl`'s existing three features
+  (`financial_pl.view`, `.submit`, `.manage`) rather than declaring
+  JPK_KR_PD-specific ones — see Design decisions for why.
 
 ### Design decisions
 
@@ -345,16 +385,51 @@ job is authorizing that derived scope (superAdmin bypass,
 `jpkGenerateSchema`/`jpkSubmitSchema` don't even declare
 `organizationId`/`tenantId` fields — just `{ filingId }` — because
 generate/submit only ever act on an *existing* filing already scoped
-at creation time. **This document's `jpk-kr.generate` command shape,
-`{ tenantId, organizationId, fiscalYear, celZlozenia }`, should follow
-the same pattern**: drop `tenantId`/`organizationId` from what the
-handler trusts (accepting-but-ignoring them, as `jpkFilingUpsertSchema`
-does, is acceptable for schema compatibility; the point is the handler
-must call `resolveCommandScope(ctx)` and use *that*, never
-`parsed.tenantId`/`parsed.organizationId`, for every lookup, create,
-and `ensureTenantScope`/`ensureOrganizationScope` call) — this closes
-the gap the Edge Cases section below previously accepted as
-unmitigated caller responsibility.
+at creation time. **Corrected 2026-09-18, second pass: this document's
+command surface itself needed to change, not just its trust model.**
+The real sibling doesn't have one `generate` command that both creates
+and generates — it has three: `upsert_filing` (creates/updates the
+filing shell, takes `{ tenantId?, organizationId?, ...fields }` with
+those two fields accepted-but-ignored per the pattern above, **is
+undoable**), `generate` (`{ filingId }` only — no scope fields at all,
+since it only ever acts on an already-scoped existing filing, **not
+undoable**), and `submit` (`{ filingId }` only, **not undoable** —
+Ministry submissions can't be un-sent). This document's original single
+`jpk-kr.generate` command, `{ tenantId, organizationId, fiscalYear,
+celZlozenia }` doing both create-and-generate in one step, had no real
+precedent and is replaced with the same three-command split, named
+`financial_pl.jpk_kr.upsert_filing` / `.generate` / `.submit` (see New
+components, above, and API Contracts, below) — this closes the gap the
+Edge Cases section below previously accepted as unmitigated caller
+responsibility, and gives each command the right undo semantics instead
+of one command conflating a reversible step (creating the filing shell)
+with two irreversible ones (building XML, submitting it).
+
+**Undo Contract (added 2026-09-18, per this repo's own spec-writing
+review heuristic — "is Undo as detailed as Execute?" — which this
+document had not addressed at all).** `financial_pl.jpk_kr.upsert_filing`
+is undoable exactly like the real `upsertFilingCommand`: a create undo
+hard-deletes the shell (no submission can have happened yet — an
+already-submitted/submitting filing is rejected before it can be
+edited, matching `commands/jpk.ts`'s own `status === 'submitted' ||
+status === JPK_SUBMITTING_STATUS` guard), an update undo restores the
+snapshot taken before the change. `financial_pl.jpk_kr.generate` and
+`.submit` are **not undoable**, matching the real `generateCommand`/
+`submitCommand` (neither sets `isUndoable`): regenerating a filing's
+XML is idempotent re-execution, not something that needs an undo path,
+and a Ministry submission is a real-world irreversible act — there is
+no "undo" for a filing the tax authority has already received, only a
+correction filing (`celZlozenia: korekta`, see Edge Cases).
+
+**ACL: reuse `financial_pl`'s existing three features, don't add new
+ones (added 2026-09-18).** The real `acl.ts` declares only
+`financial_pl.view` / `.submit` / `.manage` — coarse, module-wide, not
+per-filing-type — and JPK_V7's own commands don't check any
+finer-grained feature. JPK_KR_PD should follow the same shape:
+`financial_pl.jpk_kr.upsert_filing`/`.generate` require
+`financial_pl.submit` (mirroring how JPK_V7's own filing commands are
+gated), read/list paths require `financial_pl.view`. No new features
+declared in `acl.ts`/`setup.ts`.
 
 **`generatedXml`/`upoXml` need an encryption-at-rest contract —
 Confirmed 2026-09-18 against the real `financial_pl` module (corrected
@@ -570,7 +645,9 @@ not solved, here.
 
 ## 📝 Data Model
 
-New entity, `JpkKrFiling`, mirroring `JpkVatFiling`'s shape:
+New entity, `JpkKrFiling` (table `financial_pl_jpk_kr_filing`,
+snake_case plural per this repo's naming convention — added
+2026-09-18, previously unstated), mirroring `JpkVatFiling`'s shape:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -595,6 +672,25 @@ raw XSD, so the shape below is named but not yet locked):
 |---|---|---|
 | `filingId` | uuid, FK → `JpkKrFiling` | |
 | `rpdRevenueExempt` … `rpdCostRecognizedPriorYear` | numeric(19,4), one column per `K_x` | Six-to-eight named amount columns, not a jsonb blob — operator-entered per Comarch's own precedent (manual, permanent, not a Phase 2 stopgap; see Design decisions) |
+
+Table `financial_pl_jpk_kr_declaration_inputs` (added 2026-09-18).
+**Deliberate divergence from the sibling, flagged rather than
+silently diverged: `JpkVatFiling` doesn't have a separate
+declaration-inputs table at all — it has one `declaration_inputs`
+JSON column on the filing entity itself** (`declarationInputs:
+Record<string, unknown> | null`, no fixed shape). This document
+instead proposes a separate table with one typed `numeric(19,4)`
+column per `K_x` field. The reason to diverge: JPK_V7's declaration
+inputs are genuinely open-ended (arbitrary manual overrides across
+many possible fields), while the 2026-09-12 XSD pass fixed `RPD` to
+a small, *known*, closed set of amount fields (`K_1`–`K_6`/`K_8`) —
+typed columns give real validation (`numeric(19,4)`, not-null
+constraints once the field count is confirmed) that a JSON blob
+can't. If a reviewer here prefers matching the sibling exactly for
+consistency over the extra type safety, collapsing this into a
+single `declaration_inputs` JSON column on `JpkKrFiling` itself
+(dropping the separate entity/table) is the one-line alternative —
+flagging the choice rather than deciding it unilaterally.
 
 **Field mapping — `ZOiS` node, variant `ZOiS7` ("jednostki pozostałe" —
 confirmed the applicable variant for Commerce Weavers' target
@@ -655,11 +751,13 @@ separately.
 ## 📝 API Contracts
 
 No new HTTP routes proposed. All generation/submission happens through
-commands (mirroring JPK_V7):
+commands (mirroring JPK_V7). **Corrected 2026-09-18 to the real
+three-command split** (see Architecture → Design decisions for why the
+original single `jpk-kr.generate` command was replaced):
 
-- `jpk-kr.generate` — `{ tenantId, organizationId, fiscalYear, celZlozenia }`, but **`tenantId`/`organizationId` are accepted-but-ignored, not trusted (corrected 2026-09-18, see Architecture → Design decisions): the handler must derive scope via `resolveCommandScope(ctx)` from `ctx.auth`/`ctx.selectedOrganizationId`, exactly matching `commands/jpk.ts`'s real pattern, and use that derived scope for every lookup/create and for `ensureTenantScope`/`ensureOrganizationScope`** → resolves a `JpkKrFiling`, calls the builder chain, sets `status: draft → generated` (XML produced, not yet submitted — corrected to the real two-value naming, see Data Model).
-- `jpk-kr.submit` — `{ filingId }` → `submitJpk` (reused unchanged) → `status: submitting → polling`.
-- `jpk-kr.poll-status` — background, reused unchanged from the JPK_V7 worker pattern.
+- `financial_pl.jpk_kr.upsert_filing` — `{ id?, tenantId?, organizationId?, fiscalYear, celZlozenia, ... }`. `tenantId`/`organizationId` are accepted-but-ignored fields (schema compatibility only, matching `jpkFilingUpsertSchema`'s own optional-but-unused fields) — the handler derives real scope via `resolveCommandScope(ctx)` and uses that for every lookup/create and for `ensureTenantScope`/`ensureOrganizationScope`. Rejects editing a filing whose `status` is `submitted` or `submitting`, matching `commands/jpk.ts`'s own guard. **Undoable** (see Architecture → Undo Contract).
+- `financial_pl.jpk_kr.generate` — `{ filingId }` only, no scope fields at all (mirrors `jpkGenerateSchema` exactly — it only ever acts on a filing already scoped at creation, looked up by `resolveCommandScope(ctx)` + `filingId`). Calls the builder chain, sets `status: draft → generated`. **Not undoable.**
+- `financial_pl.jpk_kr.submit` — `{ filingId }` only. Sets `status: generated → submitting`, calls `submitJpk` (reused unchanged), and — matching `commands/jpk.ts`'s real behavior exactly — **polls inline within the same command execution** (`pollJpkStatus`, for the resume-an-in-flight-submission case), rather than through a separate exposed `.poll-status` command. A prior pass on this document proposed `jpk-kr.poll-status` as its own command; the real sibling has no such command — polling is either inline in `submit`'s own retry/resume path or driven by a background worker, never its own top-level command. Corrected. **Not undoable.**
 
 ## 📝 UI/UX
 
@@ -683,13 +781,26 @@ backend exists. Left for a follow-up once Phase 1 (backend) is agreed.
   work through what changes between an initial and a corrected
   `JpkKrFiling` beyond the field itself — needs its own pass once Phase 1
   is built and a real correction scenario is in front of us.
+- **Concurrent double-submit (added 2026-09-18, real gap — this
+  document had no transaction-boundary discussion at all for
+  `.submit`).** `commands/jpk.ts`'s real `submitCommand` claims the
+  filing with a conditional `nativeUpdate` (`WHERE status =
+  'generated'` → `SET status = 'submitting'`, checking
+  `updated === 1` and throwing `409` otherwise) before calling the
+  Ministry gateway — this is what stops two concurrent `.submit`
+  calls (or a retry racing the original) from both reaching the
+  gateway. `financial_pl.jpk_kr.submit` must use the same
+  compare-and-swap claim, not a plain `em.flush()` after a
+  read-then-write — this is Confirmed against real code, not an
+  open question, so it's a requirement here, not a Phase 2 nice-to-have.
 - **Wrong `tenantId`/`organizationId` passed to the bulk-read calls.**
   Inherited risk from `#6038` (explicit caller responsibility, no
   framework guardrail) at the `LedgerBulkReadService` layer itself —
   that part is unchanged; the bulk reads still trust whatever scope
   they're called with. **Corrected 2026-09-18, re-verified against
-  real `official-modules` code:** the outer `jpk-kr.generate`/
-  `.submit` commands are not similarly unmitigated, provided they
+  real `official-modules` code:** the outer
+  `financial_pl.jpk_kr.upsert_filing`/`.generate`/`.submit` commands
+  are not similarly unmitigated, provided they
   follow `commands/jpk.ts`'s real pattern — `resolveCommandScope(ctx)`
   derives scope from the authenticated context, never from the
   request body, so there is no caller-supplied `tenantId`/
@@ -761,12 +872,16 @@ backend exists. Left for a follow-up once Phase 1 (backend) is agreed.
    sources disagree) and `S_12_1`'s exact allowed-value enumeration for
    the `ZOiS7` variant against the raw schema, not summaries of it.
 3. Add `requires: ['ledger']` to `financial_pl`'s `ModuleInfo`.
-4. `JpkKrFiling` entity + migration.
+4. `JpkKrFiling` + `JpkKrDeclarationInputs` entities + migration
+   (table names corrected 2026-09-18, see Data Model).
 5. `build-zois.ts` / `build-dziennik.ts` / `build-konto-zapis.ts`, each
    independently unit-testable against `LedgerBulkReadService`'s DTOs.
 6. `compute-rpd.ts` stub (manual-input passthrough only, Phase 1).
-7. `commands/jpk-kr.ts` wiring `resolveJpkKrFiling → buildJpkKrXml →
-   submitJpk/pollJpkStatus` (last two: reuse, not reimplementation).
+7. `commands/jpk-kr.ts`: `financial_pl.jpk_kr.upsert_filing`
+   (undoable) → `.generate` (`resolveJpkKrFiling → buildJpkKrXml`) →
+   `.submit` (`submitJpk`/`pollJpkStatus`, reuse not reimplementation)
+   — corrected 2026-09-18 to the real three-command split, see API
+   Contracts.
 8. `workers/jpk-kr-generate.worker.ts` on an annual trigger.
 9. Update `2026-09-08-financial-module-knowledge-base.md`'s dependency
    graph to show `financial_pl → ledger`.
@@ -786,8 +901,9 @@ in this family (e.g. `2026-08-18-general-ledger-core-engine.md`).
   the builder's handling of missing fields (synthesize `Z_1`, leave
   `D_2`/`D_9`/`Z_2` as documented placeholders) is asserted, not left
   implicit.
-- **Scope-derivation test (corrected 2026-09-18).** `jpk-kr.generate`/
-  `.submit` ignore a payload `tenantId`/`organizationId` that
+- **Scope-derivation test (corrected 2026-09-18).**
+  `financial_pl.jpk_kr.upsert_filing` ignores a payload
+  `tenantId`/`organizationId` that
   disagrees with the calling context and act on the context's own
   scope instead (never the body's) — and a caller with no allowed
   access to the context-derived organization gets `403 Forbidden`
@@ -885,6 +1001,112 @@ final:
   `jpk-submission-client.ts` need a streaming rewrite? Flagged, not
   designed here — real design work, not something to improvise inline
   while fixing a review.
+
+## Final Compliance Report — 2026-09-18
+
+Run once, at the point of migration into `official-modules` — this
+document had never been checked against this repo's own `AGENTS.md`/
+spec-writing rules before (it was drafted and reviewed entirely under
+`open-mercato`'s own `om-spec-writing` convention). Checked honestly,
+not performatively: several items below are Non-compliant or flagged,
+not rounded up to Compliant.
+
+### AGENTS.md Files Reviewed
+
+- `AGENTS.md` (root, `official-modules`)
+- `.ai/specs/AGENTS.md`
+- `.ai/skills/spec-writing/SKILL.md` (review heuristics + checklist)
+
+### Compliance Matrix
+
+| Rule Source | Rule | Status | Notes |
+|---|---|---|---|
+| root AGENTS.md | Module is an external extension; MUST NOT modify core packages | Compliant | No core package touched; `ledger` (in `open-mercato`) is consumed via `requires` + DI resolution, the same pattern `wms`'s real code uses for `feature_toggles` — verified against real code, not assumed |
+| root AGENTS.md | No cross-module `@ManyToOne` ORM relationships | Compliant | `JpkKrFiling` has no ORM relation to any `ledger` entity; GL data comes through `LedgerBulkReadService` DTOs only |
+| root AGENTS.md | MUST filter every query by `organization_id` | Compliant | `resolveCommandScope(ctx)` derives scope server-side for every command; see Architecture → Design decisions |
+| root AGENTS.md | MUST validate all inputs with zod in `data/validators.ts` | Non-compliant | Schema *shapes* are named (`jpkKrFilingUpsertSchema` etc.) but no zod literal is written in this document — same as this document's own JPK_V7 citations, but real `data/validators.ts` will need the actual schemas before implementation |
+| root AGENTS.md | MUST use `findWithDecryption`/`findOneWithDecryption` for PII/encrypted fields | Non-compliant | `generatedXml`/`upoXml` are specified as encrypted (Architecture → Design decisions) but no read path in this document names `findWithDecryption` explicitly — add when `commands/jpk-kr.ts` is implemented |
+| root AGENTS.md | MUST use declarative guards (`requireAuth`, `requireFeatures`) | N/A | No new HTTP routes or backend pages proposed in this pass (see UI/UX) — applies once the Phase 2 UI tab is designed |
+| root AGENTS.md | MUST NOT return sensitive data in error messages | Non-compliant | Not addressed — `commands/jpk.ts`'s real error paths (missing signer cert, missing MF cert) return operator-facing config errors; this document doesn't check whether any JPK_KR_PD-specific error path could leak XML content or credentials |
+| root AGENTS.md naming | Command ID `<moduleId>.<feature>.<action>` | Compliant (corrected 2026-09-18) | `financial_pl.jpk_kr.upsert_filing`/`.generate`/`.submit` — a prior pass used `jpk-kr.generate` with no module prefix; fixed against real `commands/jpk.ts` IDs |
+| root AGENTS.md naming | Entity singular PascalCase, table snake_case plural | Compliant (corrected 2026-09-18) | `JpkKrFiling` → `financial_pl_jpk_kr_filing`; table names were previously unstated |
+| spec-writing SKILL.md | External Extension First — everything via UMES extension points | Compliant | `requires` + DI resolution is UMES's own documented cross-module mechanism, not a `packages/core` modification; verified via `wms`/`feature_toggles` precedent |
+| spec-writing SKILL.md | Singularity Law (singular event/command names) | Compliant | `jpk_kr` module-scoped feature name is singular; no plural entity/command names introduced |
+| spec-writing SKILL.md | Undo Contract as detailed as Execute | Compliant (corrected 2026-09-18) | Previously entirely absent; now `upsert_filing` (undoable) vs. `generate`/`submit` (not undoable, matching real code) is explicit — see Architecture |
+| spec-writing SKILL.md | Module Isolation — DI usage specified for service wiring (Awilix) | Compliant | `container.resolve('ledgerBulkReadService')`, named explicitly |
+| spec-writing checklist §3 | Write operations define atomicity/transaction boundaries | Compliant (corrected 2026-09-18) | Previously absent; the compare-and-swap `nativeUpdate` claim pattern for `.submit` is now specified (Edge Cases), matching `commands/jpk.ts`'s real double-submit protection |
+| spec-writing checklist §5 | Migration/backward compatibility strategy is explicit | Compliant | Additive only — new entity/commands, new `requires` declaration; no existing `financial_pl` contract changes (Risks & Impact Review) |
+| spec-writing checklist §6 | Performance/cache/pagination items | N/A | No list/search HTTP API proposed in this pass — all reads happen server-side, in a worker, against `LedgerBulkReadService`'s own `AsyncIterable` streams |
+| spec-writing checklist §7 | Risk Register uses the required Scenario/Severity/Affected area/Mitigation/Residual risk format | Non-compliant | This document's Risks & Impact Review predates that format (written under `om-spec-writing`'s own risk convention) — not reformatted in this pass; flagged rather than mechanically reformatted without re-checking each risk's substance |
+
+### Internal Consistency Check
+
+| Check | Status | Notes |
+|---|---|---|
+| Data models match API contracts | Pass | `JpkKrFiling`/`JpkKrDeclarationInputs` fields match the three commands' inputs/outputs |
+| Commands defined for all mutations | Pass | `upsert_filing`/`generate`/`submit` cover create, build, and send; no mutation without a named command |
+| Undo contract covers every command | Pass (corrected 2026-09-18) | Previously Fail (no undo discussion at all) |
+| Risks cover all write operations | Partial | Covers the ones this document's own Edge Cases names; not run through the Risk Register's required format (see Compliance Matrix) |
+| Cache strategy covers all read APIs | N/A | No cacheable read API in this pass |
+
+### Non-Compliant Items
+
+- **Rule**: MUST validate all inputs with zod in `data/validators.ts`
+  **Source**: root `AGENTS.md`
+  **Gap**: Schema shapes are named, not written as zod literals
+  **Recommendation**: Write `jpkKrFilingUpsertSchema`/`jpkKrGenerateSchema`/`jpkKrSubmitSchema` in `data/validators.ts` before implementation starts; mirror `jpkFilingUpsertSchema`'s real shape for the upsert one
+
+- **Rule**: MUST use `findWithDecryption`/`findOneWithDecryption` for encrypted fields
+  **Source**: root `AGENTS.md`
+  **Gap**: No read path in this document names the decryption helper explicitly
+  **Recommendation**: Every `em.findOne(JpkKrFiling, ...)` in `commands/jpk-kr.ts` must go through `findOneWithDecryption`, matching `commands/jpk.ts`'s own usage
+
+- **Rule**: MUST NOT return sensitive data in error messages
+  **Source**: root `AGENTS.md`
+  **Gap**: Not checked against this document's own error paths
+  **Recommendation**: Audit `financial_pl.jpk_kr.submit`'s error responses (signer cert missing, MF cert missing, gateway rejection) before implementation, mirroring `commands/jpk.ts`'s existing care not to echo credential material
+
+- **Rule**: Risk Register required format (Scenario/Severity/Affected area/Mitigation/Residual risk)
+  **Source**: `.ai/skills/spec-writing/references/spec-checklist.md` §7
+  **Gap**: Risks & Impact Review section predates this format
+  **Recommendation**: Re-run Risks & Impact Review through the required Risk Register format before Phase 1 sign-off — not done in this pass because it needs re-thinking each risk's severity/residual-risk honestly, not a mechanical reformat
+
+### Verdict
+
+**Non-compliant — Blocked** on the four items above before implementation (not before further design review; none of them are architecture-level blockers, all are documentation/detail gaps this pass surfaced but didn't fully close). Architecture-level compliance (module isolation, DI pattern, command naming, undo contract, table naming) is Confirmed against real code as of this report.
+
+## Changelog
+
+### 2026-09-11
+- Initial specification, staged temporarily in `open-mercato`'s `.ai/specs/` (official-modules access not available in that working environment at the time).
+
+### 2026-09-12
+- Q2 corrected (cohort/timing, VAT-frequency-based not revenue-based).
+- Primary-source XSD verification pass: real 7-node structure, `RPD`'s true (small, manual) scope, new mandatory `S_12_1` marker discovered.
+
+### Review — 2026-09-16
+- **Reviewer**: @pkarw (independent maintainer, `open-mercato#6069`)
+- **Security**: 2 blockers (caller-supplied tenant/org scope; missing encryption contract)
+- **Performance**: 1 major (whole-ledger in-memory assembly scale)
+- **Commands**: 1 major (filing status machine vs. `JpkVatFiling`'s real contract)
+- **Risks**: 1 major (missing integration test plan), 1 major (placement in wrong repo)
+- **Verdict**: Request changes — 2 blocker, 5 major findings
+
+### 2026-09-18 (fixes applied, round 1)
+- Confirmed the review's own Validation Gate was stale (cited a head 4 days behind the branch's real tip).
+- Fixed both Blockers using this repo's own precedent (`api_keys.sessionSecretEncrypted`, `channel_discord`'s encryption pattern) — later superseded by round 2 below once direct `official-modules` access was confirmed.
+- Fixed Major #2's deadline sub-claim (real Ministry regulation, 2026-02-20, extends the deadline to end of July 2026 for the earliest cohort).
+- Flagged Major #4 (scale) and fixed Major #5 (added Testing Strategy).
+- Left Major #3 (status machine) as Q5, believing `official-modules` unreachable.
+
+### 2026-09-18 (fixes applied, round 2 — official-modules access confirmed)
+- Corrected round 1's Blocker #1/#2 fixes against the real `commands/jpk.ts`/`encryption.ts` (scope is server-derived via `resolveCommandScope`, never client-trusted; `defaultEncryptionMaps` confirmed exactly as the review cited; walked back an overclaim that RPD amount columns needed encryption — the sibling's own `declarationInputs` isn't encrypted).
+- Resolved Q5 (Major #3) as Confirmed, not left open: real `JpkFilingStatusColumn` is `draft | generated | submitted` plus an undeclared runtime `submitting` value; corrected `JpkKrFiling.status` to match.
+
+### 2026-09-18 (moved to `official-modules`, compliance pass)
+- Moved from `open-mercato#6069` to `official-modules` (this document) — Major #1 resolved.
+- Corrected the command surface itself: replaced the single conflated `jpk-kr.generate` with the real three-command split (`financial_pl.jpk_kr.upsert_filing`/`.generate`/`.submit`), matching `commands/jpk.ts` exactly, including which commands are undoable.
+- Added Overview, Undo Contract, ACL reuse decision, table names, the `JpkKrDeclarationInputs` JSON-vs-typed-columns divergence note, double-submit compare-and-swap protection, and this Final Compliance Report — closing this document's gap against `official-modules`' own `AGENTS.md`/spec-writing requirements, which it had never been checked against before.
 
 ---
 
