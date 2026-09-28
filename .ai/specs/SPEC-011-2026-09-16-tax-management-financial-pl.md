@@ -523,8 +523,46 @@ verifiable reference IBANs (`GB82 WEST...`, `DE89 3704...`).
 **ERPNext, Odoo, GnuCash** — re-confirmed from the parent document:
 none have an equivalent of a government-assigned, checksum-derived tax
 payment account; a genuine, explainable divergence (mikrorachunek is a
-Poland-specific mechanism introduced 2020), not a gap. Not re-searched
-this pass.
+Poland-specific mechanism introduced 2020), not a gap.
+
+**Comarch ERP Optima, enova365, Symfonia (Poland-specific reference
+systems), verified 2026-09-28** — checked per this project's
+comparison-step convention for `financial_pl` specs (not done in the
+first pass of this document; added on review). All three diverge from
+this document's design the same way: none of them computes the
+mikrorachunek from the taxpayer's NIP/PESEL inside the application.
+Each instead stores a manually entered or one-time looked-up account
+number against the tax office/company profile and reuses it when
+generating payments:
+- **Comarch ERP Optima** — [Deklaracje, a płatności z nimi
+  związane](https://pomoc.comarch.pl/optima/pl/2026/dokumentacja/deklaracje-a-platnosci-z-nimi-zwiazane/):
+  declaration-linked payments post to a Kasa/Bank preliminary-payments
+  list for manual transfer; ZUS individual account numbers are
+  explicitly "wprowadzić" (entered) on the office form, not derived.
+- **enova365** — [Indywidualny rachunek podatkowy w
+  enova365](https://erpit.pl/post/54-indywidualny-rachunek-podatkowy-w-enova365):
+  the account is entered once under Narzędzia → Opcje → Firma → Urzędy
+  i KRS (or per-owner for PIT) and auto-populated onto VAT/CIT payments
+  from then on — not recomputed from NIP/PESEL each time.
+- **Symfonia** (Start Mała Księgowość) — [Przelew podatku do
+  US](https://pomoc.symfonia.pl/data/mk/Start/2024_b/data/html_mkrp0054.htm):
+  "Jeżeli typy i numery rachunków urzędu nie zostały wprowadzone w jego
+  opisie, to należy wpisać numer rachunku" — manual entry is the
+  documented fallback; a dropdown only reuses a previously hand-entered
+  number.
+
+This is a genuine, checkable design choice, not a gap in our research:
+all three market-leading Polish systems treat the mikrorachunek as
+configuration data entered once, rather than a value the software
+derives at generation time. This document keeps live computation
+(Design decisions) because it removes a manual setup step and a class
+of transcription errors, and the algorithm is public and stable since
+its 2020 introduction — but this is now a disclosed, deliberate
+divergence from market practice, not an oversight. ⚠ Worth a
+maintainer's explicit sign-off: if the team prefers to match market
+convention (store the number instead of computing it, falling back to
+computation only when unset), that is a small change to the command's
+data source, not a redesign.
 
 ## Final Compliance Report — 2026-09-28
 
@@ -613,6 +651,19 @@ addressed in this document specifically:
   start (Overview, Final Compliance Report, Risk Register format),
   rather than carrying over `om-spec-writing`'s narrative-research
   style research passages verbatim.
+
+### 2026-09-28 (follow-up) — financial-spec-writing-process Step 3 completed
+
+The first pass of this document's split left Step 3 (real-system
+comparison) incomplete for the Poland-specific mikrorachunek design —
+only ERPNext/Odoo/GnuCash had been checked, and none of those model a
+country-specific tax account at all. Flagged by Mikołaj; followed up
+by checking the actual Poland-specific reference systems the process
+calls for (Comarch ERP Optima, enova365, Symfonia — see Literature &
+Prior Art above): all three store the mikrorachunek as manually
+entered configuration rather than computing it from NIP/PESEL, a real
+and now-disclosed divergence from this document's live-computation
+design. No other section changed.
 
 Not yet reviewed under `official-modules`' own maintainer process. No
 implementation exists yet.
