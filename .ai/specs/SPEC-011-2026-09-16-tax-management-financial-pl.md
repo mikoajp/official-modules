@@ -41,12 +41,36 @@
 > below), not `open-mercato`'s `om-spec-writing` convention the parent
 > document used while staged there.
 
+## 📝 Target layout (decided 2026-10-08)
+
+The Polish half of Tax Management lives in a new package,
+`financial_pl_accounting` (module id `financial_pl_accounting`), not in
+`financial_pl`, so that `financial_pl` stays installable without a ledger
+(KSeF and JPK_V7 do not need one).
+
+- **Dependencies.** Hard `requires` on `financial_pl`, `ledger`,
+  `tax_management` and `financial_statements` (package overview: SPEC-013).
+  `financial_pl` declares no `requires`.
+- **VAT input.** The VAT engine reads `financial_pl`'s VAT register through
+  a read-only DI service, `vatRegisterReadService` (SPEC-012), not through
+  its entities. It posts only the settlement through `tax_management`. The
+  CIT and PIT engines read GL balances (#6013). GL balances also reconcile
+  the register (SPEC-013). This matches `open-mercato#6168`.
+- **Identifiers.** Command `financial_pl_accounting.tax.generate_payment_instruction`,
+  routes under `/api/financial-pl-accounting/tax/`, feature
+  `financial_pl_accounting.tax.pay`, files under
+  `packages/financial_pl_accounting/src/modules/financial_pl_accounting/`.
+- **Reading this document.** Below, "`financial_pl`" as the place where the
+  engines, routes and feature live means `financial_pl_accounting`;
+  "`financial_pl`" as the source of the VAT register and JPK_V7 is
+  unchanged.
+
 ## 📝 TLDR
 
-Adds `financial_pl`'s side of period-close tax remittance: VAT/CIT/PIT
+Adds the Polish side (`financial_pl_accounting`) of period-close tax remittance: VAT/CIT/PIT
 `ITaxEngine` implementations registered against `tax_management`'s DI
 tokens, a pure offline mikrorachunek podatkowy (tax micro-account)
-checksum calculator, and a `financial_pl.tax.generate_payment_instruction`
+checksum calculator, and a `financial_pl_accounting.tax.generate_payment_instruction`
 command + route that produces the IBAN + amount + tytuł przelewu an
 accountant pastes into their own banking software. Phase 1 stops at the
 instruction; sending the transfer is a human action, confirmed back via
@@ -73,9 +97,9 @@ are genuinely Poland-specific and belong here, not in the framework:
 
 1. **What actually gets posted for VAT, CIT, and PIT-4** — the account
    roles and journal-line shapes differ per tax (see Architecture →
-   Design decisions), and only `financial_pl`, which already reads GL
-   account balances and JPK_V7 figures, has the domain logic to compute
-   them.
+   Design decisions), and only the Polish package, which reads the VAT
+   register through `financial_pl` and the GL account balances, has the
+   domain logic to compute them.
 2. **The mikrorachunek podatkowy checksum** — a Poland-specific,
    NIP/PESEL-derived bank account number (Design decisions below).
 3. **The payment instruction itself** (IBAN + amount + tytuł przelewu,
@@ -84,8 +108,8 @@ are genuinely Poland-specific and belong here, not in the framework:
 
 ## 📝 Proposed Solution
 
-`financial_pl` (depends on `tax_management` the same way it already
-declares `requires: ['ledger']` for #6038/SPEC-010):
+`financial_pl_accounting` (declares `requires` on `financial_pl`,
+`ledger`, `tax_management` and `financial_statements`, see SPEC-013):
 
 1. Registers `ITaxEngine`/`ITaxReporting` implementations for `VAT`,
    `CIT`, and `PIT` (PIT-4 withholding) against `tax_management`'s
@@ -106,17 +130,16 @@ Nothing in Phase 1 moves money (Alternatives considered, Phasing).
 
 ### New components in `financial_pl`
 
-- `packages/financial_pl/src/modules/financial_pl/tax/microAccount.ts`
+- `packages/financial_pl_accounting/src/modules/financial_pl_accounting/tax/microAccount.ts`
   — `computeMicroAccount(identifier: string, kind: 'NIP' | 'PESEL'):
   string`. No I/O. Unit-tested against the golden-file set below.
-- `packages/financial_pl/src/modules/financial_pl/tax/taxEngine.ts` —
+- `packages/financial_pl_accounting/src/modules/financial_pl_accounting/tax/taxEngine.ts` —
   registers `VAT`/`CIT`/`PIT` `ITaxEngine` implementations at module
-  setup (`requires: ['tax_management']`, alongside the existing
-  `requires: ['ledger']`). Each implementation declares its
+  setup (`tax_management` is among the package's `requires`). Each implementation declares its
   `accountRoles` and returns balanced `lines[]` from `calculate()` —
   see Design decisions for what each tax actually needs.
-- `packages/financial_pl/src/modules/financial_pl/commands/generateTaxPaymentInstruction.ts`
-  — command id **`financial_pl.tax.generate_payment_instruction`**
+- `packages/financial_pl_accounting/src/modules/financial_pl_accounting/commands/generateTaxPaymentInstruction.ts`
+  — command id **`financial_pl_accounting.tax.generate_payment_instruction`**
   (module-prefixed per root `AGENTS.md` naming). Input:
   `{ taxLiabilityRecordId }`. **Not a mutating command — no persisted
   side effect, so no Undo Contract applies** (it only reads
@@ -124,13 +147,13 @@ Nothing in Phase 1 moves money (Alternatives considered, Phasing).
   shape). Rejects if the record's `status` isn't `'posted'` (paying an
   unposted or already-`paid` liability is meaningless) or if the
   tenant's NIP is missing/malformed (Edge Cases).
-- `packages/financial_pl/src/modules/financial_pl/api/POST/tax/payment-instruction.ts`
-  — thin route wrapper, `requireFeatures: ['financial_pl.tax.pay']`
+- `packages/financial_pl_accounting/src/modules/financial_pl_accounting/api/POST/tax/payment-instruction.ts`
+  — thin route wrapper, `requireFeatures: ['financial_pl_accounting.tax.pay']`
   (see API Contracts).
 - UI block in the period-close screen (UI/UX below) calling this route,
   plus a "Mark as paid" button calling `tax_management.markTaxLiabilityPaid`
-  through its own thin route (`POST /api/financial-pl/tax/mark-paid`,
-  same `financial_pl.tax.pay` gate) — `markTaxLiabilityPaid` itself is a
+  through its own thin route (`POST /api/financial-pl-accounting/tax/mark-paid`,
+  same `financial_pl_accounting.tax.pay` gate) — `markTaxLiabilityPaid` itself is a
   Core command with no ACL check of its own (matching the existing
   precedent that cross-module command targets trust their caller's
   route-level `requireFeatures`, e.g. `ledger.postJournalEntry` called
@@ -287,7 +310,7 @@ non-PLN-denominated tax liability is ever needed, not designed here.
 
 ### Undo Contract
 
-- `financial_pl.tax.generate_payment_instruction` — **not undoable, and
+- `financial_pl_accounting.tax.generate_payment_instruction` — **not undoable, and
   not applicable**: it persists nothing (Architecture above).
 - `financial_pl`'s own `taxEngine.ts` registrations are setup-time DI
   wiring, not a command — no undo contract applies.
@@ -302,9 +325,9 @@ other fixes.)
 
 ## 📝 API Contracts
 
-**`POST /api/financial-pl/tax/payment-instruction`** — body
+**`POST /api/financial-pl-accounting/tax/payment-instruction`** — body
 `{ taxLiabilityRecordId }`, returns `{ iban, amount, currency, title }`.
-`requireFeatures: ['financial_pl.tax.pay']` (new feature — see ACL
+`requireFeatures: ['financial_pl_accounting.tax.pay']` (new feature — see ACL
 below; the parent document's "requires whatever ACL `financial_pl`
 already gates its own JPK/KSeF submission routes with" was too vague
 for a route that produces a bank transfer target, per review M4).
@@ -312,16 +335,16 @@ Rejects 422 if the tenant's NIP/PESEL is missing or malformed, 409 if
 the record isn't in `'posted'` status, 422 if the resolved currency
 isn't PLN.
 
-**`POST /api/financial-pl/tax/mark-paid`** — body
+**`POST /api/financial-pl-accounting/tax/mark-paid`** — body
 `{ taxLiabilityRecordId, paidAt, paymentReference }`. Same
-`requireFeatures: ['financial_pl.tax.pay']` gate. Internally calls
+`requireFeatures: ['financial_pl_accounting.tax.pay']` gate. Internally calls
 `commandBus.execute('tax_management.markTaxLiabilityPaid', { input: {...}, ctx })`
 — the two-argument signature, matching every other cross-module command
 call in this family.
 
 ### ACL
 
-- `financial_pl.tax.pay` — gates both routes above. `defaultRoleFeatures`:
+- `financial_pl_accounting.tax.pay` — gates both routes above. `defaultRoleFeatures`:
   `admin`/`superadmin` only (a route that both reveals a bank target and
   confirms payment is not an `employee`-level action, matching this
   family's existing posture for anything that touches money —
@@ -331,10 +354,10 @@ call in this family.
 
 Within `financial_pl`'s existing period-close screen (wherever
 JPK_KR_PD's own trigger lives, per SPEC-010): a copyable IBAN/amount/title
-block calling `POST /api/financial-pl/tax/payment-instruction`, plus a
-"Mark as paid" button calling `POST /api/financial-pl/tax/mark-paid`.
+block calling `POST /api/financial-pl-accounting/tax/payment-instruction`, plus a
+"Mark as paid" button calling `POST /api/financial-pl-accounting/tax/mark-paid`.
 Both hidden (not merely disabled) for a viewer without
-`financial_pl.tax.pay`.
+`financial_pl_accounting.tax.pay`.
 
 ## 📝 Edge Cases & Failure Scenarios
 
@@ -420,9 +443,10 @@ payment-confirmation half, which lives here now.)
 ## Out of scope
 
 - **Tax calculation logic's numeric inputs** — how much VAT/CIT/PIT is
-  actually owed. `ITaxEngine.calculate`'s real implementation reads GL
-  account balances (`open-mercato#6013`) and whatever `financial_pl`
-  already computes for JPK_V7; this document defines the posting
+  actually owed. `ITaxEngine.calculate`'s real implementation reads the
+  VAT register through `financial_pl`'s read-only DI service
+  `vatRegisterReadService` (SPEC-012) for VAT, and GL account balances
+  (`open-mercato#6013`) for CIT and PIT; this document defines the posting
   *shape* (Design decisions) but not the balance-reading logic itself.
 - **VAT refund handling** (Edge Cases).
 - **Automated bank-rail payment execution.**
@@ -455,11 +479,11 @@ against Cash & Bank Management's imported statements.
 
 ## Testing Strategy
 
-Integration coverage (m5): `POST /api/financial-pl/tax/payment-instruction`
+Integration coverage (m5): `POST /api/financial-pl-accounting/tax/payment-instruction`
 happy path (200, correct IBAN for a golden-file NIP), 409 (non-`posted`
 record), 422 (missing NIP, non-PLN currency); `POST
-/api/financial-pl/tax/mark-paid` happy path and 403 without
-`financial_pl.tax.pay`; the period-close screen's "Mark as paid"
+/api/financial-pl-accounting/tax/mark-paid` happy path and 403 without
+`financial_pl_accounting.tax.pay`; the period-close screen's "Mark as paid"
 button, gated the same way. `computeMicroAccount`'s own golden-file set
 (unit-level, Design decisions) is the correctness backbone underneath
 all of the above.
@@ -468,14 +492,14 @@ all of the above.
 
 | File | Action | Notes |
 |---|---|---|
-| `packages/financial_pl/src/modules/financial_pl/tax/microAccount.ts` | Create | Pure mikrorachunek checksum function |
-| `packages/financial_pl/src/modules/financial_pl/tax/taxEngine.ts` | Create | VAT/CIT/PIT `ITaxEngine` registration, role-keyed balanced lines |
-| `packages/financial_pl/src/modules/financial_pl/commands/generateTaxPaymentInstruction.ts` | Create | `financial_pl.tax.generate_payment_instruction` |
-| `packages/financial_pl/src/modules/financial_pl/api/POST/tax/payment-instruction.ts` | Create | Route + `requireFeatures` |
-| `packages/financial_pl/src/modules/financial_pl/api/POST/tax/mark-paid.ts` | Create | Calls `tax_management.markTaxLiabilityPaid` |
-| `packages/financial_pl/src/modules/financial_pl/acl.ts` | Modify | Add `financial_pl.tax.pay` |
-| `packages/financial_pl/src/modules/financial_pl/__integration__/tax-payment.spec.ts` | Create | Integration coverage above |
-| `packages/financial_pl/src/modules/financial_pl/tax/__tests__/microAccount.golden.test.ts` | Create | Golden-file checksum set |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/tax/microAccount.ts` | Create | Pure mikrorachunek checksum function |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/tax/taxEngine.ts` | Create | VAT/CIT/PIT `ITaxEngine` registration, role-keyed balanced lines |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/commands/generateTaxPaymentInstruction.ts` | Create | `financial_pl_accounting.tax.generate_payment_instruction` |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/api/POST/tax/payment-instruction.ts` | Create | Route + `requireFeatures` |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/api/POST/tax/mark-paid.ts` | Create | Calls `tax_management.markTaxLiabilityPaid` |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/acl.ts` | Create | `financial_pl_accounting.tax.pay` (the package's own ACL) |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/__integration__/tax-payment.spec.ts` | Create | Integration coverage above |
+| `packages/financial_pl_accounting/src/modules/financial_pl_accounting/tax/__tests__/microAccount.golden.test.ts` | Create | Golden-file checksum set |
 
 ## Literature & Prior Art
 
@@ -581,11 +605,11 @@ data source, not a redesign.
 | root AGENTS.md | MUST filter every query by `organization_id` | Compliant | Both new routes derive scope server-side, matching `resolveCommandScope(ctx)` precedent from SPEC-010 — real implementation must call it, not accept scope from the request body |
 | root AGENTS.md | MUST validate all inputs with zod in `data/validators.ts` | Non-compliant | Schema shapes are named in prose, not written as zod literals — real `data/validators.ts` needs `taxPaymentInstructionSchema`/`taxMarkPaidSchema` before implementation |
 | root AGENTS.md | MUST use `findWithDecryption`/`findOneWithDecryption` for PII | Compliant | Explicitly named for the PESEL read path (Design decisions, m3) |
-| root AGENTS.md | MUST use declarative guards (`requireAuth`, `requireFeatures`) | Compliant | `financial_pl.tax.pay` named and applied to both routes (API Contracts) |
+| root AGENTS.md | MUST use declarative guards (`requireAuth`, `requireFeatures`) | Compliant | `financial_pl_accounting.tax.pay` named and applied to both routes (API Contracts) |
 | root AGENTS.md | MUST NOT return sensitive data in error messages | Non-compliant | Not audited — real route error paths (malformed NIP, missing mapping) must be checked before implementation to confirm no PESEL/NIP fragment leaks into a 4xx body |
-| root AGENTS.md naming | Command ID `<moduleId>.<feature>.<action>` | Compliant | `financial_pl.tax.generate_payment_instruction` |
+| root AGENTS.md naming | Command ID `<moduleId>.<feature>.<action>` | Compliant | `financial_pl_accounting.tax.generate_payment_instruction` |
 | spec-writing SKILL.md | Undo Contract as detailed as Execute | Compliant (N/A) | The one command in this document is non-mutating; explicitly marked N/A with reasoning, not silently omitted |
-| spec-writing SKILL.md | Module Isolation — DI usage specified | Compliant | `requires: ['tax_management']` alongside existing `requires: ['ledger']`; registration mechanism named (`taxEngine.ts`, setup-time) |
+| spec-writing SKILL.md | Module Isolation — DI usage specified | Compliant | the package's `requires` include `tax_management` and `ledger` (SPEC-013); registration mechanism named (`taxEngine.ts`, setup-time) |
 | spec-writing checklist §7 | Risk Register required format | Compliant | Risks & Impact Review above uses Scenario/Severity/Affected area/Mitigation/Residual risk throughout — written fresh in this format, not carried over from the parent document's prose-style Risks section |
 
 ### Internal Consistency Check
@@ -667,3 +691,8 @@ design. No other section changed.
 
 Not yet reviewed under `official-modules`' own maintainer process. No
 implementation exists yet.
+
+### 2026-10-08 — target layout, VAT input
+- The engines, mikrorachunek and payment-instruction flow move to the package `financial_pl_accounting` (Target layout section). Command, route, feature and file-path identifiers are renamed; the engines and ACL logic are unchanged.
+- The VAT engine's input is the VAT register read through `vatRegisterReadService` (SPEC-012), no longer GL balances; CIT and PIT still read GL balances. Matches the 2026-10-08 change in `open-mercato#6168`.
+- Dependencies: the package `requires` `financial_pl`, `ledger`, `tax_management` and `financial_statements` (SPEC-013), instead of adding `requires` to `financial_pl`.
