@@ -539,9 +539,11 @@ Phase 1 must emit it, just with manually-entered content (see next).
 **Major correction: `RPD`'s real scope is much smaller than this
 document assumed, and Phase 1's "manual input" design is very likely
 the right permanent shape, not a stopgap.** `RPD` is a small, flat
-summary node — six or eight amount fields (two independent sources
-disagree on the exact count, `K_1`–`K_6` vs `K_1`–`K_8`; the raw XSD is
-the tie-breaker, not attempted here), each a simple total (e.g.
+summary node — eight amount fields, `K_1`–`K_8` (an earlier draft said
+six or eight because two secondary sources disagreed; the 2026-10-08 pass
+found Comarch XL's documentation and an independent field-mapping page
+agreeing on eight, see Changelog; the raw XSD remains the final check),
+each a simple total (e.g.
 tax-exempt revenue, non-deductible costs), **not** a per-account or
 per-posting classification the way this document's Design Decisions
 section (Kieso Ch.19 grounding) implied Phase 2 would need to compute.
@@ -554,7 +556,7 @@ manual-passthrough design is not obviously an inferior stopgap ahead of
 a "real" automated Phase 2 — a mature, real ERP treats this exact
 node the same way, permanently. The Kieso Ch.19 temporary/permanent-
 difference grounding (Design decisions, above) stays useful as a
-*classification aid for the human filling in* `K_1`–`K_6`/`K_8` (which
+*classification aid for the human filling in* `K_1`–`K_8` (which
 bucket does this book/tax gap belong in), not necessarily as the basis
 for an automatic engine "comparable in size to the Posting Rules
 Engine" — that sizing claim should be treated as unconfirmed and
@@ -664,14 +666,30 @@ snake_case plural per this repo's naming convention — added
 `JpkKrDeclarationInputs` (operator-entered `RPD` fields — corrected
 2026-09-12, see Architecture → Primary-source XSD verification: `RPD`
 is a small, flat set of summary amounts, not the open-ended
-`rpdAdjustments` blob this document originally assumed; exact field
-count (`K_1`–`K_6` vs `K_1`–`K_8`, sources disagree) still needs the
-raw XSD, so the shape below is named but not yet locked):
+`rpdAdjustments` blob this document originally assumed). Eight amount
+columns, one per `K_x`, fixed 2026-10-08:
 
-| Field | Type | Notes |
+| Field | `RPD` node | Meaning |
 |---|---|---|
-| `filingId` | uuid, FK → `JpkKrFiling` | |
-| `rpdRevenueExempt` … `rpdCostRecognizedPriorYear` | numeric(19,4), one column per `K_x` | Six-to-eight named amount columns, not a jsonb blob — operator-entered per Comarch's own precedent (manual, permanent, not a Phase 2 stopgap; see Design decisions) |
+| `filingId` | | uuid, FK → `JpkKrFiling` |
+| `rpdRevenueExempt` | `K_1` | revenue exempt from tax (permanent difference) |
+| `rpdRevenueNotTaxableCurrentYear` | `K_2` | revenue not subject to tax in the current year |
+| `rpdRevenueTaxableBookedPriorYear` | `K_3` | taxable revenue of the current year booked in prior years |
+| `rpdCostNonDeductible` | `K_4` | costs that are not tax-deductible (permanent difference) |
+| `rpdCostNotRecognizedCurrentYear` | `K_5` | costs not recognized as tax-deductible in the current year |
+| `rpdCostRecognizedPriorYear` | `K_6` | tax-deductible costs of the current year booked in prior years |
+| `rpdRevenueTaxableNotBooked` | `K_7` | taxable revenue not recorded in the books |
+| `rpdCostDeductibleNotBooked` | `K_8` | tax-deductible costs not recorded in the books |
+
+All eight are `numeric(19,4)`, `not null`, default `0`, operator-entered
+(manual, permanent, not a Phase 2 stopgap, per Comarch's own precedent;
+see Design decisions), not a jsonb blob. Meanings follow Comarch ERP XL's
+JPK_KR_PD documentation and an independent field-mapping page; the field
+names and the exact node element names are checked against the vendored
+XSD as the first step of Phase 1 (Implementation Plan), and the columns are
+corrected before the first migration if the schema differs. When all eight
+values are zero, `.generate` returns a warning (not an error), matching
+Comarch XL's "unfilled income tax settlement amounts" validation.
 
 Table `financial_pl_jpk_kr_declaration_inputs` (added 2026-09-18).
 **Deliberate divergence from the sibling, flagged rather than
@@ -683,9 +701,9 @@ instead proposes a separate table with one typed `numeric(19,4)`
 column per `K_x` field. The reason to diverge: JPK_V7's declaration
 inputs are genuinely open-ended (arbitrary manual overrides across
 many possible fields), while the 2026-09-12 XSD pass fixed `RPD` to
-a small, *known*, closed set of amount fields (`K_1`–`K_6`/`K_8`) —
+a small, *known*, closed set of eight amount fields (`K_1`–`K_8`) —
 typed columns give real validation (`numeric(19,4)`, not-null
-constraints once the field count is confirmed) that a JSON blob
+constraints) that a JSON blob
 can't. If a reviewer here prefers matching the sibling exactly for
 consistency over the extra type safety, collapsing this into a
 single `declaration_inputs` JSON column on `JpkKrFiling` itself
@@ -868,9 +886,10 @@ backend exists. Left for a follow-up once Phase 1 (backend) is agreed.
    published documentation, not a byte-level read of the raw
    `.xsd` yet. Still needed before this is fully buildable: vendor the
    actual `Schemat_JPK_KR_PD(1)_v1-0.xsd` file itself and confirm the
-   `RPD` field count (`K_1`-`K_6` vs `K_1`-`K_8` -- two secondary
-   sources disagree) and `S_12_1`'s exact allowed-value enumeration for
-   the `ZOiS7` variant against the raw schema, not summaries of it.
+   `RPD` field list (`K_1`-`K_8`, eight columns decided 2026-10-08 from
+   two agreeing secondary sources) and `S_12_1`'s exact allowed-value
+   enumeration for the `ZOiS7` variant against the raw schema, not
+   summaries of it.
 3. Add `requires: ['ledger']` to `financial_pl`'s `ModuleInfo`.
 4. `JpkKrFiling` + `JpkKrDeclarationInputs` entities + migration
    (table names corrected 2026-09-18, see Data Model).
@@ -977,10 +996,10 @@ final:
   new, tenant-configured mapping on or alongside `LedgerAccount`,
   comparable in shape to `LedgerAccountGroup`'s own precedent. Not
   designed here; needs its own pass, the same discipline this document
-  already applies to `RPD`. Also unresolved: the exact `RPD` field count
-  (`K_1`-`K_6` vs `K_1`-`K_8`) and `S_12_1`'s full allowed-value list for
-  the `ZOiS7` variant -- both need the raw XSD, not the secondary
-  documentation this pass used.
+  already applies to `RPD`. Also unresolved: `S_12_1`'s full allowed-value
+  list for the `ZOiS7` variant, and the final confirmation of the `RPD`
+  field list (`K_1`-`K_8`, decided 2026-10-08 from secondary sources) --
+  both need the raw XSD, not the secondary documentation this pass used.
 - **Q5 — Resolved 2026-09-18, from PR `#6069`'s review (@pkarw, Major
   #3).** Confirmed: `official-modules`'s real `JpkFilingStatusColumn`
   is `'draft' | 'generated' | 'submitted'`, plus a fourth, type-cast
@@ -1107,6 +1126,9 @@ not rounded up to Compliant.
 - Moved from `open-mercato#6069` to `official-modules` (this document) — Major #1 resolved.
 - Corrected the command surface itself: replaced the single conflated `jpk-kr.generate` with the real three-command split (`financial_pl.jpk_kr.upsert_filing`/`.generate`/`.submit`), matching `commands/jpk.ts` exactly, including which commands are undoable.
 - Added Overview, Undo Contract, ACL reuse decision, table names, the `JpkKrDeclarationInputs` JSON-vs-typed-columns divergence note, double-submit compare-and-swap protection, and this Final Compliance Report — closing this document's gap against `official-modules`' own `AGENTS.md`/spec-writing requirements, which it had never been checked against before.
+
+### 2026-10-08 (RPD field count)
+- `RPD` has eight amount fields, `K_1`–`K_8`: Comarch ERP XL's JPK_KR_PD documentation and an independent field-mapping page (Staria) give the same eight, all entered manually. The earlier "six or eight" wording is removed in Architecture, Data Model and Open Questions, and `JpkKrDeclarationInputs` now lists eight named `numeric(19,4)` columns (Data Model). An all-zero `RPD` produces a warning on `.generate`, not an error. The vendored XSD is still the final check; it is the first Phase 1 step, and the columns are corrected before the first migration if it differs. No other change in this entry (location of the code, `requires` and the use of `submitJpk` are unchanged here).
 
 ---
 
